@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { isSafeUrl, fetchPageText } from '../src/fetch.ts';
+import { isSafeUrl, fetchPageText, detectJsWall } from '../src/fetch.ts';
 import type { Config } from '../src/types.ts';
 
 // Mock dns/promises lookup
@@ -278,5 +278,56 @@ describe('fetchPageText', () => {
 
     await expect(fetchPageText(longUrl, shortConfig)).rejects.toThrow('URL rejected by SSRF guard');
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('detectJsWall', () => {
+  it('detects Notion JS wall', () => {
+    expect(
+      detectJsWall(
+        'Notion JavaScript must be enabled in order to use Notion. Please enable JavaScript to continue.',
+      ),
+    ).toBe(true);
+  });
+
+  it('detects Uniswap JS wall', () => {
+    expect(
+      detectJsWall('Uniswap Interface You need to enable JavaScript to run this app.'),
+    ).toBe(true);
+  });
+
+  it('detects generic "enable JavaScript to continue" pattern', () => {
+    expect(detectJsWall('Please enable JavaScript to continue.')).toBe(true);
+  });
+
+  it('detects "JavaScript is required" pattern', () => {
+    expect(detectJsWall('JavaScript is required to view this page.')).toBe(true);
+  });
+
+  it('returns false for normal content mentioning JavaScript', () => {
+    // Long content about JavaScript — not a JS wall
+    expect(
+      detectJsWall(
+        'JavaScript is a versatile programming language used for web development. ' +
+          'It supports object-oriented, functional, and event-driven programming styles. ' +
+          'Modern JavaScript (ES6+) includes features like arrow functions, promises, and modules. ' +
+          'You can use JavaScript on both the client and server side.',
+      ),
+    ).toBe(false);
+  });
+
+  it('returns false for short content without JavaScript keyword', () => {
+    expect(detectJsWall('Loading...')).toBe(false);
+  });
+
+  it('returns false for empty string', () => {
+    expect(detectJsWall('')).toBe(false);
+  });
+
+  it('returns false when content is >= 300 chars even if pattern matches', () => {
+    // Pad a JS-wall pattern to exceed the length threshold
+    const padded =
+      'You need to enable JavaScript to run this app. ' + 'x'.repeat(300);
+    expect(detectJsWall(padded)).toBe(false);
   });
 });
