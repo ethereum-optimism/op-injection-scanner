@@ -45,6 +45,29 @@ export async function isSafeUrl(url: string, maxUrlLength: number): Promise<bool
   );
 }
 
+// Patterns found in the noscript/fallback content of JS-rendered SPAs.
+// Matched against the stripped text (lowercase) when content is short.
+const JS_WALL_PATTERNS: readonly RegExp[] = [
+  /you need to enable javascript/i,
+  /javascript must be enabled/i,
+  /please enable javascript/i,
+  /enable javascript to (?:run|use|continue)/i,
+  /requires javascript to (?:run|function|work)/i,
+  /javascript is required/i,
+  /javascript is disabled/i,
+] as const;
+
+// Returns true when the stripped page text looks like a JS-wall shell — i.e. the
+// actual content is only available after JS execution and we got nothing useful.
+// The 300-char cap is generous: real JS-wall shells are typically 30–80 chars after
+// stripping, while legitimate pages that mention JavaScript are much longer.
+export function detectJsWall(strippedText: string): boolean {
+  if (strippedText.length >= 300) return false;
+  const lower = strippedText.toLowerCase();
+  if (!lower.includes('javascript')) return false;
+  return JS_WALL_PATTERNS.some((pattern) => pattern.test(lower));
+}
+
 function stripHtml(html: string): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')

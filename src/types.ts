@@ -19,9 +19,19 @@ export const ScanResultSchema = z.discriminatedUnion('status', [
     model_used: z.string(),
     escalated: z.boolean(),
   }),
+  z.object({
+    // The page could not be scanned — e.g. a JS-rendered SPA where the HTTP fetch
+    // only returns a shell with no content. The caller should try to obtain the
+    // content via another means (e.g. Notion MCP) and call scan_text instead.
+    status: z.literal('unverifiable'),
+    reason: z.enum(['js_rendering_required']),
+    url: z.string(),
+    scanned_at: z.string(),
+  }),
 ]);
 
 export type ScanResult = z.infer<typeof ScanResultSchema>;
+export type UnverifiableReason = 'js_rendering_required';
 
 // --- Model classification outputs ---
 

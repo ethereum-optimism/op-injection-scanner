@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { LRUCache, cacheKey } from './cache.ts';
-import { fetchPageText } from './fetch.ts';
+import { fetchPageText, detectJsWall } from './fetch.ts';
 import {
   HAIKU_SYSTEM_PROMPT,
   SONNET_SYSTEM_PROMPT,
@@ -31,6 +31,8 @@ export class Scanner {
     this.config = config;
   }
 
+  // Public: scan a URL — fetch, detect JS-wall, then classify.
+  // Unverifiable results (JS-wall) are cached: the HTTP shell won't change within TTL.
   async scan(url: string): Promise<ScanResult> {
     const key = cacheKey(url, this.config.cacheTtlSeconds);
 
@@ -42,14 +44,36 @@ export class Scanner {
 
     console.error(`[scanner] cache miss, fetching: ${url}`);
     const pageText = await fetchPageText(url, this.config);
-    const result = await this.classify(url, pageText);
 
+    if (detectJsWall(pageText)) {
+      console.error(`[scanner] js-wall detected, unverifiable: ${url}`);
+      const result: ScanResult = {
+        status: 'unverifiable',
+        reason: 'js_rendering_required',
+        url,
+        scanned_at: new Date().toISOString(),
+      };
+      this.cache.set(key, result);
+      return result;
+    }
+
+    const result = await this.runClassification(pageText, url);
     this.cache.set(key, result);
     return result;
   }
 
-  private async classify(url: string, pageText: string): Promise<ScanResult> {
-    const userTurn = buildUserTurn(pageText);
+  // Public: scan raw text directly — for content fetched via other means
+  // (Notion MCP, pasted text, file contents, etc.). No cache — caller owns the content lifecycle.
+  // sourceUrl is used only for audit logging in the result's url field.
+  async scanText(text: string, sourceUrl?: string): Promise<ScanResult> {
+    return this.runClassification(text, sourceUrl ?? '<direct text>');
+  }
+
+  // Private: LLM classification pipeline (Haiku → Sonnet → Opus).
+  // Accepts already-obtained text; has no knowledge of how content was acquired.
+  // Parameters: text first (content to classify), sourceUrl second (for result metadata).
+  private async runClassification(text: string, sourceUrl: string): Promise<ScanResult> {
+    const userTurn = buildUserTurn(text);
     const scanned_at = new Date().toISOString();
 
     // Tier 1: Haiku
@@ -64,17 +88,16 @@ export class Scanner {
     const tier1 = haiku.parsed_output;
     if (tier1 === null) {
       // Parsing failure — treat as uncertain and escalate
-      console.error(`[scanner] haiku parse failure, escalating: ${url}`);
+      console.error(`[scanner] haiku parse failure, escalating: ${sourceUrl}`);
     } else if (
       tier1.verdict !== 'uncertain' &&
       tier1.confidence >= this.config.confidenceThreshold
     ) {
-      // Confident Haiku result — return without escalation
       if (tier1.verdict === 'clean') {
         return {
           status: 'clean',
-          content: pageText,
-          url,
+          content: text,
+          url: sourceUrl,
           scanned_at,
           model_used: HAIKU_MODEL,
           escalated: false,
@@ -83,7 +106,7 @@ export class Scanner {
         return {
           status: 'blocked',
           reason: tier1.reason,
-          url,
+          url: sourceUrl,
           scanned_at,
           model_used: HAIKU_MODEL,
           escalated: false,
@@ -92,7 +115,7 @@ export class Scanner {
     }
 
     // Tier 2: Sonnet escalation
-    console.error(`[scanner] escalating to Sonnet: ${url}`);
+    console.error(`[scanner] escalating to Sonnet: ${sourceUrl}`);
     const sonnet = await this.client.messages.parse({
       model: SONNET_MODEL,
       max_tokens: 256,
@@ -110,8 +133,8 @@ export class Scanner {
       if (tier2.verdict === 'clean') {
         return {
           status: 'clean',
-          content: pageText,
-          url,
+          content: text,
+          url: sourceUrl,
           scanned_at,
           model_used: SONNET_MODEL,
           escalated: true,
@@ -120,7 +143,7 @@ export class Scanner {
         return {
           status: 'blocked',
           reason: tier2.reason,
-          url,
+          url: sourceUrl,
           scanned_at,
           model_used: SONNET_MODEL,
           escalated: true,
@@ -129,7 +152,7 @@ export class Scanner {
     }
 
     // Tier 3: Opus — final arbiter, cannot return uncertain
-    console.error(`[scanner] escalating to Opus: ${url}`);
+    console.error(`[scanner] escalating to Opus: ${sourceUrl}`);
     const opus = await this.client.messages.parse({
       model: OPUS_MODEL,
       max_tokens: 256,
@@ -140,11 +163,10 @@ export class Scanner {
 
     const tier3 = opus.parsed_output;
     if (tier3 === null) {
-      // Opus parsing failure — fail safe (block)
       return {
         status: 'blocked',
         reason: 'Classification failed — blocked as a precaution',
-        url,
+        url: sourceUrl,
         scanned_at,
         model_used: OPUS_MODEL,
         escalated: true,
@@ -154,8 +176,8 @@ export class Scanner {
     if (tier3.verdict === 'clean') {
       return {
         status: 'clean',
-        content: pageText,
-        url,
+        content: text,
+        url: sourceUrl,
         scanned_at,
         model_used: OPUS_MODEL,
         escalated: true,
@@ -164,7 +186,7 @@ export class Scanner {
       return {
         status: 'blocked',
         reason: tier3.reason,
-        url,
+        url: sourceUrl,
         scanned_at,
         model_used: OPUS_MODEL,
         escalated: true,

@@ -24,23 +24,50 @@ server.tool(
 
       if (result.status === 'clean') {
         return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result),
-            },
-          ],
+          content: [{ type: 'text', text: JSON.stringify(result) }],
         };
       } else {
-        // Return as tool error so the calling agent knows to stop processing this URL
+        // blocked: injection detected — caller should not process this URL
+        // unverifiable: page requires JS rendering — caller should try scan_text with content
+        //   obtained via another means (e.g. Notion MCP), or surface to the user
         return {
           isError: true,
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result),
-            },
-          ],
+          content: [{ type: 'text', text: JSON.stringify(result) }],
+        };
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        isError: true,
+        content: [{ type: 'text', text: JSON.stringify({ status: 'error', message, url }) }],
+      };
+    }
+  },
+);
+
+server.tool(
+  'scan_text',
+  'Scan raw text content for prompt injection. Use when you already have content from another source (e.g. Notion MCP fetch, pasted text, file contents) and need to verify it before processing.',
+  {
+    text: z.string().min(1).describe('The text content to scan for prompt injection'),
+    source_url: z
+      .string()
+      .url()
+      .optional()
+      .describe('Optional: the URL or source identifier this text came from, for audit logging'),
+  },
+  async ({ text, source_url }: { text: string; source_url?: string | undefined }) => {
+    try {
+      const result = await scanner.scanText(text, source_url);
+
+      if (result.status === 'clean') {
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result) }],
+        };
+      } else {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: JSON.stringify(result) }],
         };
       }
     } catch (err) {
@@ -48,14 +75,7 @@ server.tool(
       return {
         isError: true,
         content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              status: 'error',
-              message,
-              url,
-            }),
-          },
+          { type: 'text', text: JSON.stringify({ status: 'error', message, source_url }) },
         ],
       };
     }
